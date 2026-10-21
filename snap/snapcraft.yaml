@@ -1,0 +1,169 @@
+name: bambu-studio
+title: Bambu Studio
+summary: PC software for Bambu Lab and other 3D printers
+description: |
+  Bambu Studio is a cutting-edge, feature-rich slicing software. It contains
+  project-based workflows, systematically optimized slicing algorithms, and an
+  easy-to-use graphical interface, bringing users an incredibly smooth printing
+  experience.
+license: AGPL-3.0-only
+website: https://bambulab.com/en/download/studio
+source-code: https://github.com/bambulab/BambuStudio
+issues: https://github.com/bambulab/BambuStudio/issues
+icon: snap/gui/bambu-studio.png
+adopt-info: bambu-studio
+
+base: core24
+grade: stable
+confinement: strict
+
+platforms:
+  amd64:
+  arm64:
+
+apps:
+  bambu-studio:
+    command: opt/bambu-studio/bin/bambu-studio
+    desktop: opt/bambu-studio/resources/applications/BambuStudio.desktop
+    common-id: com.bambulab.BambuStudio
+    extensions: [gnome]
+    environment:
+      # ffmpeg shared libraries are installed next to the binary
+      LD_LIBRARY_PATH: $SNAP/opt/bambu-studio/bin:$LD_LIBRARY_PATH
+      # The bundled OpenSSL has its build-time OPENSSLDIR (under /root/parts/...)
+      # compiled in; point it at the CA store of the base snap instead.
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      SSL_CERT_DIR: /etc/ssl/certs
+    plugs:
+      - home
+      - removable-media
+      - network
+      - network-bind       # LAN printer discovery (SSDP) and local connections
+      - network-status     # portal NetworkMonitor/ProxyResolver (GIO connectivity checks)
+      - opengl
+      - gsettings
+      - browser-support    # WebKitGTK views (home page, MakerWorld)
+      - hardware-observe
+      - desktop
+
+parts:
+  # Third-party dependencies (Boost, wxWidgets, OCCT, CGAL, OpenVDB, ffmpeg, ...)
+  # built from source as described in the Linux Compile Guide:
+  #   cmake ../ -DDESTDIR=... -DCMAKE_BUILD_TYPE=Release -DDEP_WX_GTK3=1
+  # They are consumed only at build time and not shipped in the snap.
+  bambu-deps:
+    plugin: nil
+    source: .
+    build-packages:
+      - autoconf
+      - build-essential
+      - cmake
+      - extra-cmake-modules
+      - file
+      - gettext
+      - git
+      - libtool
+      - m4
+      - nasm
+      - ninja-build
+      - pkgconf
+      - texinfo
+      - wget
+      - yasm
+      - eglexternalplatform-dev
+      - libbz2-dev
+      - libcurl4-openssl-dev
+      - libdbus-1-dev
+      - libgl1-mesa-dev
+      - libglew-dev
+      - libglu1-mesa-dev
+      - libmspack-dev
+      - libosmesa6-dev
+      - libsecret-1-dev
+      - libssl-dev
+      - libudev-dev
+      - libunwind-dev
+      - libwayland-dev
+      - libxkbcommon-dev
+      - wayland-protocols
+    build-environment: &build-env
+      - CMAKE_BUILD_PARALLEL_LEVEL: ${CRAFT_PARALLEL_BUILD_COUNT}
+      # The GNOME SDK ships its own glibc headers, and pkg-config adds them with
+      # plain -I, so GCC stops treating them as system headers and rejects
+      # wxWidgets' snprintf/vsnprintf re-declarations ("different exception
+      # specifier"). -idirafter turns those dirs into system dirs (GCC drops the
+      # duplicate -I) searched *after* the standard ones, so the host glibc and
+      # libstdc++'s <math.h>/<stdlib.h> wrappers still take precedence (putting
+      # them earlier, e.g. via CPLUS_INCLUDE_PATH, hides ::isnan & co.).
+      - CFLAGS: -idirafter /snap/gnome-46-2404-sdk/current/usr/include/${CRAFT_ARCH_TRIPLET_BUILD_FOR} -idirafter /snap/gnome-46-2404-sdk/current/usr/include
+      - CXXFLAGS: -idirafter /snap/gnome-46-2404-sdk/current/usr/include/${CRAFT_ARCH_TRIPLET_BUILD_FOR} -idirafter /snap/gnome-46-2404-sdk/current/usr/include
+    override-build: |
+      # The GNOME SDK exposes libva, which OpenCV auto-detects (WITH_VA) but
+      # then fails to compile against (va/va.h not on the include path).
+      # Upstream builds have VA disabled in practice, so turn it off explicitly.
+      grep -q -- '-DWITH_VA=OFF' deps/OpenCV/OpenCV.cmake || \
+        sed -i 's|^\(\s*\)-DWITH_OPENCL=OFF|&\n\1-DWITH_VA=OFF\n\1-DWITH_VA_INTEL=OFF|' \
+          deps/OpenCV/OpenCV.cmake
+      cmake -S deps -B deps/build -G Ninja \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DDEP_WX_GTK3=ON \
+        -DDESTDIR="${CRAFT_PART_BUILD}/deps/build/destdir"
+      cmake --build deps/build
+      # The deps install as part of the build (ExternalProject), into a dir that
+      # survives snapcraft re-builds together with the stamp files; snapcraft
+      # wipes CRAFT_PART_INSTALL on every re-build, so copy the result over.
+      mkdir -p "${CRAFT_PART_INSTALL}/bambu-deps"
+      cp -a deps/build/destdir/. "${CRAFT_PART_INSTALL}/bambu-deps/"
+    prime:
+      - -*
+
+  bambu-studio:
+    after: [bambu-deps]
+    plugin: nil
+    source: .
+    build-packages:
+      - cmake
+      - extra-cmake-modules
+      - gettext
+      - git
+      - ninja-build
+      - pkgconf
+      - libdbus-1-dev
+      - libgl1-mesa-dev
+      - libglu1-mesa-dev
+      - libosmesa6-dev
+      - libudev-dev
+      - libwayland-dev
+      - libxkbcommon-dev
+      - wayland-protocols
+    stage-packages:
+      - libosmesa6
+    build-environment: *build-env
+    override-pull: |
+      craftctl default
+      craftctl set version="$(sed -n 's/^set(SLIC3R_VERSION "\(.*\)")/\1/p' version.inc)"
+    override-build: |
+      # Equivalent of the Linux Compile Guide / BuildLinux.sh -s, using the
+      # portable (non-FHS) layout so resources are found relative to the binary.
+      cmake -S . -B build -G Ninja \
+        -DCMAKE_PREFIX_PATH="${CRAFT_STAGE}/bambu-deps/usr/local" \
+        -DCMAKE_INSTALL_PREFIX=/opt/bambu-studio \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DSLIC3R_STATIC=ON \
+        -DSLIC3R_GTK=3 \
+        -DSLIC3R_FHS=OFF \
+        -DSLIC3R_DESKTOP_INTEGRATION=OFF \
+        -DBBL_RELEASE_TO_PUBLIC=1 \
+        -DBBL_INTERNAL_TESTING=0
+      # libslic3r TUs (CGAL/OCCT + PCH) need 1-2+ GB each; cap jobs to avoid OOM
+      cmake --build build --target BambuStudio -j 8
+      DESTDIR="${CRAFT_PART_INSTALL}" cmake --install build
+
+      # Point the desktop entry at the snap icon
+      sed -i 's|^Icon=.*|Icon=${SNAP}/meta/gui/icon.png|' \
+        "${CRAFT_PART_INSTALL}/opt/bambu-studio/resources/applications/BambuStudio.desktop"
+    prime:
+      - -usr/share/doc
+      - -usr/include
+      - -usr/lib/*/pkgconfig
