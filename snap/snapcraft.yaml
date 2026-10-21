@@ -142,7 +142,12 @@ parts:
     build-environment: *build-env
     override-pull: |
       craftctl default
-      craftctl set version="$(sed -n 's/^set(SLIC3R_VERSION "\(.*\)")/\1/p' version.inc)"
+      # CI writes the full version (e.g. with a +git suffix for edge) here
+      if [ -s snap/local/version ]; then
+        craftctl set version="$(cat snap/local/version)"
+      else
+        craftctl set version="$(sed -n 's/^set(SLIC3R_VERSION "\(.*\)")/\1/p' version.inc)"
+      fi
     override-build: |
       # Equivalent of the Linux Compile Guide / BuildLinux.sh -s, using the
       # portable (non-FHS) layout so resources are found relative to the binary.
