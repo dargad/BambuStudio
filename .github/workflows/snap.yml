@@ -4,8 +4,9 @@ name: Snap
 #  * master is fast-forwarded to upstream/master
 #  * snap (the packaging commits) is rebased on top of it
 #  * the rebased snap branch is built and released to edge
-#  * the newest upstream release tag on master, if not yet in beta, is built
-#    with the packaging commits on top and released to beta
+#  * the newest upstream release tag on master is built once with the
+#    packaging commits on top and released to beta; the snap-<tag> branch
+#    pushed for it marks the tag as done
 #
 # Required secrets:
 #  SYNC_TOKEN                   PAT with contents + workflows write access to
@@ -26,6 +27,10 @@ on:
         description: Build and release to edge even if nothing changed
         type: boolean
         default: false
+      force-beta:
+        description: Build and release the latest tag to beta even if done before
+        type: boolean
+        default: false
 
 concurrency:
   group: snap
@@ -35,9 +40,6 @@ env:
   UPSTREAM: https://github.com/bambulab/BambuStudio.git
   UPSTREAM_BRANCH: master
   SNAP_BRANCH: snap
-  SNAP_NAME: bambu-studio
-  # Platforms in snapcraft.yaml; beta is considered done once all have the version
-  SNAP_ARCHES: 2
 
 jobs:
   sync:
@@ -75,20 +77,19 @@ jobs:
 
       - name: Prepare beta branch for the latest release tag
         id: beta
+        env:
+          FORCE: ${{ inputs.force-beta }}
         run: |
           tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "upstream/$UPSTREAM_BRANCH" 2>/dev/null) || exit 0
           version=$(git show "$tag:version.inc" | sed -n 's/^set(SLIC3R_VERSION "\(.*\)")/\1/p')
-          released=$(curl -fsS -H 'Snap-Device-Series: 16' \
-              "https://api.snapcraft.io/v2/snaps/info/$SNAP_NAME?fields=version,channel" |
-            jq --arg v "$version" '[."channel-map"[]
-                | select(.channel.track == "latest" and .channel.risk == "beta" and .version == $v)
-                | .channel.architecture] | unique | length') || true
-          released=${released:-0}
-          echo "Latest tag $tag (version $version), in beta for $released arch(es)"
-          [ "$released" -ge "$SNAP_ARCHES" ] && exit 0
+          branch="snap-$tag"
+          echo "Latest tag $tag (version $version)"
+          if [ "$FORCE" != true ] && git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "$branch already exists, beta already built for $tag"
+            exit 0
+          fi
 
           # Packaging commits replayed on top of the tag
-          branch="snap-$tag"
           git switch -c "$branch" HEAD
           git rebase --onto "$tag" "upstream/$UPSTREAM_BRANCH"
           git push --force origin "HEAD:refs/heads/$branch"
